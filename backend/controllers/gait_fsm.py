@@ -30,6 +30,13 @@ class GaitPhaseStateMachine:
         self.gait_cycle_percent = 0.0
         self.stride_count = 0
 
+    def set_cycle_period(self, period_s: float) -> None:
+        """Dynamically adapts gait stride period (e.g. 2.0s for WALK, 0.85s for RUN)."""
+        if period_s > 0.1 and abs(self.cycle_period_s - period_s) > 0.01:
+            ratio = (self.cycle_time_s / self.cycle_period_s) if self.cycle_period_s > 0 else 0.0
+            self.cycle_period_s = float(period_s)
+            self.cycle_time_s = ratio * self.cycle_period_s
+
     def reset(self) -> None:
         self.phase = GaitPhase.INITIAL_CONTACT
         self.cycle_time_s = 0.0
@@ -39,6 +46,9 @@ class GaitPhaseStateMachine:
     def step(self, dt: float, heel_force_n: float, metatarsal_force_n: float,
              toe_force_n: float, knee_angle_deg: float, knee_vel_deg_s: float) -> Dict[str, Any]:
         """Advances gait phase machine given sensor readings."""
+        # Enforce strict anatomical knee range of motion limits (0° to 120° flexion, zero hyperextension)
+        knee_angle_deg = max(0.0, min(120.0, float(knee_angle_deg)))
+
         self.cycle_time_s += dt
         if self.cycle_time_s >= self.cycle_period_s:
             self.cycle_time_s -= self.cycle_period_s

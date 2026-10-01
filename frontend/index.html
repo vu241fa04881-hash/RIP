@@ -97,6 +97,8 @@
               <button id="btn-toggle-anatomy" class="tool-btn active" title="Toggle Human Anatomy Visibility">Anatomy</button>
               <button id="btn-toggle-sensors" class="tool-btn active" title="Toggle Virtual Sensors">Sensors</button>
               <button id="btn-reset-cam" class="tool-btn" title="Reset Camera View">Reset Camera</button>
+              <input type="file" id="input-load-glb" accept=".glb,.gltf" style="display:none;">
+              <button id="btn-load-glb" class="tool-btn" title="Load or drag-and-drop custom .glb / .gltf 3D model">📁 Load .GLB</button>
             </div>
           </div>
         </div>
@@ -161,7 +163,7 @@
             <span class="info-icon">ⓘ</span>
           </div>
           <div id="card-val-mode" class="metric-hero-val text-cyan">WALK</div>
-          <div class="metric-sub-label">2.0s Cadence</div>
+          <div id="card-sub-mode" class="metric-sub-label">2.0s Cadence (60 spm)</div>
         </div>
 
         <div class="primary-metric-card" data-tooltip="Knee flexion angle relative to anatomical neutral (0° = full extension)">
@@ -763,10 +765,14 @@
   <!-- Load Three.js & Controls (Offline-ready with CDN fallback) -->
   <script src="js/vendor/three.min.js"></script>
   <script src="js/vendor/OrbitControls.js"></script>
+  <script src="js/vendor/GLTFLoader.js"></script>
   <script>
     if (typeof THREE === 'undefined') {
       document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"><\/script>');
       document.write('<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"><\/script>');
+      document.write('<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"><\/script>');
+    } else if (typeof THREE.GLTFLoader === 'undefined') {
+      document.write('<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"><\/script>');
     }
   </script>
 

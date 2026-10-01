@@ -3,8 +3,24 @@
  * SIH 2026 | PS SIH26113 | Team: BERSERK TECHIES | Team ID: TEAM-147
  * 
  * High-precision CAD / orthographic biomechanical canvas visualization
- * synchronized at 60 Hz with closed-loop telemetry.
+ * synchronized at 60 Hz in lockstep with the 3D Digital Twin and closed-loop telemetry.
  */
+
+// Canvas roundRect polyfill for full browser compatibility
+if (typeof CanvasRenderingContext2D !== 'undefined' && !CanvasRenderingContext2D.prototype.roundRect) {
+  CanvasRenderingContext2D.prototype.roundRect = function (x, y, w, h, radii) {
+    if (!radii) radii = 0;
+    const r = Array.isArray(radii) ? radii[0] : (typeof radii === 'number' ? radii : 0);
+    const radius = Math.min(r, Math.abs(w) / 2, Math.abs(h) / 2);
+    this.moveTo(x + radius, y);
+    this.arcTo(x + w, y, x + w, y + h, radius);
+    this.arcTo(x + w, y + h, x, y + h, radius);
+    this.arcTo(x, y + h, x, y, radius);
+    this.arcTo(x, y, x + w, y, radius);
+    this.closePath();
+    return this;
+  };
+}
 
 class MoveAssist2DSchematic {
   constructor(canvasId) {
@@ -12,28 +28,36 @@ class MoveAssist2DSchematic {
     if (!this.canvas) return;
     this.ctx = this.canvas.getContext('2d');
     
-    // Telemetry state & smooth interpolated motion state
-    this.target_knee_deg = 0.0;
-    this.target_thigh_deg = 0.0;
-    this.target_shank_deg = 0.0;
+    // Bilateral Joint Kinematics (100% frame-synchronized with 3D Digital Twin)
+    this.right_knee_deg = 0.0;
+    this.right_thigh_deg = 0.0;
+    this.right_ankle_deg = 0.0;
 
-    this.current_knee_deg = 0.0;
-    this.current_thigh_deg = 0.0;
-    this.current_shank_deg = 0.0;
+    this.left_knee_deg = 0.0;
+    this.left_thigh_deg = 0.0;
+    this.left_ankle_deg = 0.0;
+
     this.thigh_pitch_deg = 0.0;
     this.shank_pitch_deg = 0.0;
-
     this.omega_knee_deg_s = 0.0;
+
+    // Torques & Dynamics
     this.tau_cmd_nm = 0.0;
     this.tau_req_nm = 0.0;
     this.tau_user_nm = 0.0;
+
+    // Ground forces & sensors
     this.vgrf_n = 0.0;
     this.fsr_heel = 0.0;
     this.fsr_meta = 0.0;
     this.fsr_toe = 0.0;
     this.emg_env = 0.05;
+
+    // Gait FSM
     this.gait_phase = "STANCE";
     this.gait_pct = 0.0;
+
+    // Safety supervisor
     this.soft_stop_active = false;
     this.soft_stop_rem_s = 0.0;
     this.soft_stop_seriousness = "NORMAL";
@@ -48,7 +72,7 @@ class MoveAssist2DSchematic {
     this.onResize();
     window.addEventListener('resize', () => this.onResize());
 
-    // Animation / render loop
+    // 60 Hz Render loop
     this.render();
   }
 
@@ -66,14 +90,161 @@ class MoveAssist2DSchematic {
     this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
   }
 
+  /**
+   * Winter's Clinical Human Locomotion Biomechanics
+   * Exactly matches MoveAssist3DViewer.calculateGaitAngles for perfect 2D/3D lockstep.
+   */
+  calculateGaitAngles(p, isRun = false) {
+    p = ((p % 100) + 100) % 100;
+    let thighDeg = 0;
+    let kneeDeg = 0;
+    let ankleDeg = 0;
+
+    if (isRun) {
+      // Physiological running profile
+      thighDeg = 5.0 + 24.0 * Math.cos(2.0 * Math.PI * (p / 100.0));
+
+      if (p < 20.0) {
+        const sub = p / 20.0;
+        kneeDeg = 12.0 + 16.0 * Math.sin(sub * (Math.PI / 2.0));
+      } else if (p < 38.0) {
+        const sub = (p - 20.0) / 18.0;
+        kneeDeg = 28.0 - 18.0 * sub;
+      } else if (p < 68.0) {
+        const sub = (p - 38.0) / 30.0;
+        kneeDeg = 10.0 + 58.0 * Math.sin(sub * (Math.PI / 2.0));
+      } else {
+        const sub = (p - 68.0) / 32.0;
+        const blend = 0.5 * (1.0 + Math.cos(sub * Math.PI));
+        kneeDeg = 12.0 + 56.0 * blend;
+      }
+
+      if (p < 38.0) {
+        const sub = p / 38.0;
+        ankleDeg = -6.0 - 16.0 * sub;
+      } else {
+        const sub = (p - 38.0) / 62.0;
+        ankleDeg = -22.0 + 30.0 * Math.sin(sub * (Math.PI / 2.0));
+      }
+    } else {
+      // Winter's Clinical Human Walking Biomechanics
+      // 1. Hip/Thigh flexion: Peaks in forward flexion (+24.5°) at heel strike (p=0%), extends to -11.5° at toe-off (p=50%)
+      thighDeg = 4.0 + 18.0 * Math.cos(2.0 * Math.PI * (p / 100.0)) + 2.5 * Math.cos(4.0 * Math.PI * (p / 100.0));
+
+      // 2. Knee flexion: Double wave
+      // - Stance shock absorption: 4° -> 16° (p=0..15%) -> 4° (p=15..40%)
+      // - Terminal push-off into swing: 4° -> 32° (p=40..60%) -> peak clearance 58° (p=60..73%)
+      // - Terminal swing forward reach: Knee rapidly extends forward 58° -> 4° (p=73..100%) so foot lands heel-first
+      if (p < 15.0) {
+        const sub = p / 15.0;
+        kneeDeg = 4.0 + 12.0 * Math.sin(sub * (Math.PI / 2.0));
+      } else if (p < 40.0) {
+        const sub = (p - 15.0) / 25.0;
+        kneeDeg = 16.0 - 12.0 * sub;
+      } else if (p < 60.0) {
+        const sub = (p - 40.0) / 20.0;
+        kneeDeg = 4.0 + 28.0 * Math.sin(sub * (Math.PI / 2.0));
+      } else if (p < 73.0) {
+        const sub = (p - 60.0) / 13.0;
+        kneeDeg = 32.0 + 26.0 * Math.sin(sub * (Math.PI / 2.0));
+      } else {
+        const sub = (p - 73.0) / 27.0;
+        const blend = 0.5 * (1.0 + Math.cos(sub * Math.PI));
+        kneeDeg = 4.0 + 54.0 * blend;
+      }
+
+      // 3. Ankle dorsiflexion / plantarflexion:
+      // - Heel strike (+6° dorsiflexed), foot flat (-2°), midstance (+8°), push-off (-16° plantarflexed), swing clearance (+6°)
+      if (p < 10.0) {
+        const sub = p / 10.0;
+        ankleDeg = 6.0 - 8.0 * sub;
+      } else if (p < 40.0) {
+        const sub = (p - 10.0) / 30.0;
+        ankleDeg = -2.0 + 10.0 * sub;
+      } else if (p < 55.0) {
+        const sub = (p - 40.0) / 15.0;
+        const blend = 0.5 * (1.0 - Math.cos(sub * Math.PI));
+        ankleDeg = 8.0 - 24.0 * blend;
+      } else if (p < 75.0) {
+        const sub = (p - 55.0) / 20.0;
+        const blend = 0.5 * (1.0 - Math.cos(sub * Math.PI));
+        ankleDeg = -16.0 + 22.0 * blend;
+      } else {
+        ankleDeg = 6.0;
+      }
+    }
+
+    // Strict physiological range of motion clamping (0° full extension to 120° deep flexion)
+    kneeDeg = Math.max(0.0, Math.min(120.0, kneeDeg));
+
+    return {
+      thighDeg,
+      kneeDeg,
+      ankleDeg,
+      thighRad: (thighDeg * Math.PI) / 180.0,
+      kneeRad: (kneeDeg * Math.PI) / 180.0,
+      ankleRad: (ankleDeg * Math.PI) / 180.0
+    };
+  }
+
+  /**
+   * Calculates natural foot ground orientation angle (relative to horizontal floor).
+   * Prevents abnormal hyperextension/over-stretching of the toes during swing.
+   */
+  computeFootWorldAngleDeg(p, isRun = false) {
+    p = ((p % 100) + 100) % 100;
+    if (isRun) {
+      if (p < 18.0) {
+        // Stance initial contact & foot-flat: planted flat on platform
+        return 0.0;
+      } else if (p < 38.0) {
+        // Push-off: heel lifts, rolls onto ball of foot (plantarflexion up to +18°)
+        const sub = (p - 18.0) / 20.0;
+        return 18.0 * Math.sin(sub * (Math.PI / 2.0));
+      } else if (p < 68.0) {
+        // Flight / swing limb clearance: foot leveled parallel to floor (-4°)
+        const sub = (p - 38.0) / 30.0;
+        const blend = 0.5 * (1.0 - Math.cos(sub * Math.PI));
+        return 18.0 * (1.0 - blend) - 4.0 * blend;
+      } else {
+        // Terminal swing: foot oriented level to land flat on platform
+        return -4.0;
+      }
+    } else {
+      if (p < 10.0) {
+        // Heel strike landing: toes descend from -8° to flat (0°)
+        const sub = p / 10.0;
+        return -8.0 * (1.0 - sub);
+      } else if (p < 40.0) {
+        // Foot flat / midstance: strictly 0° level with floor
+        return 0.0;
+      } else if (p < 55.0) {
+        // Terminal stance push-off: heel lifts, foot rotates up onto toes (+18°)
+        const sub = (p - 40.0) / 15.0;
+        const blend = 0.5 * (1.0 - Math.cos(sub * Math.PI));
+        return 18.0 * blend;
+      } else if (p < 72.0) {
+        // Toe-off into initial swing: smoothly transitions from +18° to -5° for level ground clearance
+        const sub = (p - 55.0) / 17.0;
+        const blend = 0.5 * (1.0 - Math.cos(sub * Math.PI));
+        return 18.0 * (1.0 - blend) - 5.0 * blend;
+      } else if (p < 90.0) {
+        // Mid-swing clearance: held stable at -5° (level with ground, zero over-stretching!)
+        return -5.0;
+      } else {
+        // Terminal swing: prepares for heel strike, smooth descent from -5° to -8°
+        const sub = (p - 90.0) / 10.0;
+        return -5.0 - 3.0 * sub;
+      }
+    }
+  }
+
   update(telemetry) {
     if (!telemetry) return;
 
-    // Kinematics (Store as targets for smooth visual interpolation)
+    // Kinematics mode & telemetry speed
     const kin = telemetry.kinematics || {};
-    this.target_knee_deg = kin.knee_angle_deg || 0.0;
-    this.target_thigh_deg = kin.thigh_angle_deg || 0.0;
-    this.target_shank_deg = kin.shank_angle_deg || 0.0;
+    this.kin_mode = (kin.mode || 'WALK').toUpperCase().replace('-', '_');
     this.omega_knee_deg_s = kin.knee_velocity_deg_s || 0.0;
 
     // Torques
@@ -90,12 +261,10 @@ class MoveAssist2DSchematic {
     this.fsr_toe = fsr.toe_n || 0.0;
     this.vgrf_n = fsr.total_grf_n || 0.0;
     this.emg_env = sensors.emg?.envelope_norm || 0.05;
-    this.thigh_pitch_deg = sensors.imu_thigh?.pitch_deg || this.target_thigh_deg;
-    this.shank_pitch_deg = sensors.imu_shank?.pitch_deg || this.target_shank_deg;
 
-    // Gait FSM
-    this.gait_phase = telemetry.gait_phase || (fsr.is_stance ? "STANCE" : "SWING");
-    this.gait_pct = telemetry.gait_cycle_pct || 0.0;
+    // Gait FSM from simulation loop
+    this.gait_phase = telemetry.gait?.phase || (fsr.is_stance ? "STANCE" : "SWING");
+    this.gait_pct = telemetry.gait?.cycle_percent ?? 0.0;
 
     // Safety & Soft Stop
     const safety = telemetry.safety || {};
@@ -105,8 +274,64 @@ class MoveAssist2DSchematic {
     this.soft_stop_rem_s = css.remaining_s || 0.0;
     this.soft_stop_seriousness = css.fall_seriousness || safety.fall_seriousness || "NORMAL";
 
-    // Mode tracking
-    this.kin_mode = (kin.mode || 'WALK').toUpperCase().replace('-', '_');
+    // Synchronize Joint Kinematics directly with 3D model equations (ZERO LAG)
+    if (this.kin_mode === 'SIT_STAND') {
+      const kneeDeg = kin.knee_angle_deg || 0.0;
+      const thighDeg = kin.thigh_angle_deg || 0.0;
+      const ankleDeg = -(kneeDeg - thighDeg); // Dynamically maintains foot 100% flat on floor
+
+      this.right_knee_deg = kneeDeg;
+      this.right_thigh_deg = thighDeg;
+      this.right_ankle_deg = ankleDeg;
+      this.right_foot_angle_deg = 0.0;
+
+      this.left_knee_deg = kneeDeg;
+      this.left_thigh_deg = thighDeg;
+      this.left_ankle_deg = ankleDeg;
+      this.left_foot_angle_deg = 0.0;
+    } else if (this.kin_mode === 'STANDBY') {
+      this.right_knee_deg = 10.0;
+      this.right_thigh_deg = 0.0;
+      this.right_ankle_deg = -5.0;
+      this.right_foot_angle_deg = 0.0;
+
+      this.left_knee_deg = 10.0;
+      this.left_thigh_deg = 0.0;
+      this.left_ankle_deg = -5.0;
+      this.left_foot_angle_deg = 0.0;
+    } else if (this.kin_mode === 'MANUAL_JOG') {
+      const jogKnee = kin.jog_angle_deg ?? kin.knee_angle_deg ?? 0.0;
+      const jogThigh = Math.min(22.0, jogKnee * 0.20);
+      const jogAnkle = (jogThigh - jogKnee) * 0.5;
+
+      this.right_knee_deg = jogKnee;
+      this.right_thigh_deg = jogThigh;
+      this.right_ankle_deg = jogAnkle;
+      this.right_foot_angle_deg = Math.max(-10.0, Math.min(15.0, (jogThigh - jogKnee) * 0.4));
+
+      this.left_knee_deg = 8.0;
+      this.left_thigh_deg = 0.0;
+      this.left_ankle_deg = -4.0;
+      this.left_foot_angle_deg = 0.0;
+    } else {
+      // WALK / RUN: Alternating Bipedal Locomotion
+      const isRun = this.kin_mode === 'RUN';
+      const rightAngles = this.calculateGaitAngles(this.gait_pct, isRun);
+      const leftAngles = this.calculateGaitAngles((this.gait_pct + 50.0) % 100.0, isRun);
+
+      this.right_knee_deg = Math.max(0.0, Math.min(120.0, rightAngles.kneeDeg));
+      this.right_thigh_deg = rightAngles.thighDeg;
+      this.right_ankle_deg = rightAngles.ankleDeg;
+      this.right_foot_angle_deg = this.computeFootWorldAngleDeg(this.gait_pct, isRun);
+
+      this.left_knee_deg = Math.max(0.0, Math.min(120.0, leftAngles.kneeDeg));
+      this.left_thigh_deg = leftAngles.thighDeg;
+      this.left_ankle_deg = leftAngles.ankleDeg;
+      this.left_foot_angle_deg = this.computeFootWorldAngleDeg((this.gait_pct + 50.0) % 100.0, isRun);
+    }
+
+    this.thigh_pitch_deg = sensors.imu_thigh?.pitch_deg || this.right_thigh_deg;
+    this.shank_pitch_deg = sensors.imu_shank?.pitch_deg || (this.right_thigh_deg - this.right_knee_deg);
   }
 
   render() {
@@ -165,49 +390,60 @@ class MoveAssist2DSchematic {
     ctx.textAlign = 'left';
 
     // 2. Kinematic Chain Setup (Sagittal Plane)
-    // Frame-rate independent smooth exponential moving interpolation (LERP)
-    // Synchronizes smoothly with 3D model, eliminating high-speed snapping
-    const lerpFactor = 0.16;
-    this.current_knee_deg += (this.target_knee_deg - this.current_knee_deg) * lerpFactor;
-    this.current_thigh_deg += (this.target_thigh_deg - this.current_thigh_deg) * lerpFactor;
-    this.current_shank_deg += (this.target_shank_deg - this.current_shank_deg) * lerpFactor;
-
-    // Origin at Hip - balanced scale matching 3D visual amplitude
+    // Synchronized in real time with 3D model, zero LERP delay
     const scale = Math.min(w / 380, h / 460);
-    let hipX = w * 0.44;
-    let hipY = 85 * scale;
-
-    // In SIT_STAND mode: dynamically lower hip and shift posteriorly into chair
-    if (this.kin_mode === 'SIT_STAND') {
-      const sitRatio = Math.min(1.0, Math.max(0.0, this.current_knee_deg / 85.0));
-      hipY += sitRatio * (46 * scale);
-      hipX -= sitRatio * (18 * scale);
-    }
-
+    const groundY = h - 35;
     const thighLen = 120 * scale;
     const shankLen = 120 * scale;
     const footLen = 55 * scale;
+    const footHeight = 12 * scale;
 
-    // Radians
-    // Sagittal convention: 0 rad is pointing straight down along gravity plumb line
-    // Thigh flexion positive (anterior/forward)
-    const thighRad = (this.current_thigh_deg * Math.PI) / 180.0;
-    // Knee flexion positive (posterior/backward bend of shank relative to thigh)
-    const kneeRad = (this.current_knee_deg * Math.PI) / 180.0;
-    const shankRad = thighRad - kneeRad;
+    let hipX = w * 0.44;
+    let hipY = 88 * scale;
 
-    // Joint Centers
-    const kneeX = hipX + thighLen * Math.sin(thighRad);
-    const kneeY = hipY + thighLen * Math.cos(thighRad);
+    // Radians for Right Leg (Instrumented Forefront)
+    const rightThighRad = (this.right_thigh_deg * Math.PI) / 180.0;
+    const rightKneeRad = (this.right_knee_deg * Math.PI) / 180.0;
+    const rightShankRad = rightThighRad - rightKneeRad;
+    const rightAnkleRad = (this.right_ankle_deg * Math.PI) / 180.0;
+    // World orientation angle of footplate relative to floor (prevents toe over-stretching)
+    const rightFootAngleRad = (this.right_foot_angle_deg * Math.PI) / 180.0;
 
-    const ankleX = kneeX + shankLen * Math.sin(shankRad);
-    const ankleY = kneeY + shankLen * Math.cos(shankRad);
+    // Radians for Left Leg (Contralateral Background)
+    const leftThighRad = (this.left_thigh_deg * Math.PI) / 180.0;
+    const leftKneeRad = (this.left_knee_deg * Math.PI) / 180.0;
+    const leftShankRad = leftThighRad - leftKneeRad;
+    const leftAnkleRad = (this.left_ankle_deg * Math.PI) / 180.0;
+    const leftFootAngleRad = (this.left_foot_angle_deg * Math.PI) / 180.0;
 
-    const groundY = h - 35;
-    const footHeelX = ankleX - 20 * scale;
-    const footHeelY = ankleY + 12 * scale;
-    const footToeX = ankleX + 48 * scale;
-    const footToeY = ankleY + 12 * scale;
+    if (this.kin_mode === 'SIT_STAND') {
+      // Forward Kinematics so feet NEVER penetrate or float off the floor
+      const legHeight = thighLen * Math.cos(rightThighRad) + shankLen * Math.cos(rightShankRad);
+      hipY = groundY - footHeight - legHeight;
+
+      const sitRatio = Math.min(1.0, Math.max(0.0, this.right_knee_deg / 85.0));
+      hipX -= sitRatio * (22 * scale);
+    } else {
+      // Pelvis natural sinusoidal vertical bounce & lateral weight shift matching 3D
+      const bounce = -Math.cos((this.gait_pct / 100.0) * Math.PI * 4.0) * (14.0 * scale);
+      const sway = Math.sin((this.gait_pct / 100.0) * Math.PI * 2.0) * (10.0 * scale);
+      hipY = 88 * scale + bounce;
+      hipX = w * 0.44 + sway;
+    }
+
+    // Joint Centers for Right Leg
+    const rightKneeX = hipX + thighLen * Math.sin(rightThighRad);
+    const rightKneeY = hipY + thighLen * Math.cos(rightThighRad);
+
+    const rightAnkleX = rightKneeX + shankLen * Math.sin(rightShankRad);
+    const rightAnkleY = rightKneeY + shankLen * Math.cos(rightShankRad);
+
+    // Joint Centers for Left Leg
+    const leftKneeX = hipX + thighLen * Math.sin(leftThighRad);
+    const leftKneeY = hipY + thighLen * Math.cos(leftThighRad);
+
+    const leftAnkleX = leftKneeX + shankLen * Math.sin(leftShankRad);
+    const leftAnkleY = leftKneeY + shankLen * Math.cos(leftShankRad);
 
     // 3. Draw Vertical Reference Plumb Line & Hip Arc
     ctx.save();
@@ -226,7 +462,7 @@ class MoveAssist2DSchematic {
     ctx.beginPath();
     const hipArcR = 28 * scale;
     const startAng = Math.PI / 2;
-    const endAng = startAng - thighRad;
+    const endAng = startAng - rightThighRad;
     ctx.arc(hipX, hipY, hipArcR, Math.min(startAng, endAng), Math.max(startAng, endAng));
     ctx.stroke();
     ctx.restore();
@@ -250,10 +486,10 @@ class MoveAssist2DSchematic {
       ctx.stroke();
     }
 
-    // Rehab Chair Silhouette (Rendered in SIT_STAND mode)
+    // Rehab Chair Silhouette (Rendered in SIT_STAND mode matching 3D)
     if (this.kin_mode === 'SIT_STAND') {
-      const chairSeatY = 85 * scale + (46 * scale) + (14 * scale);
-      const chairSeatX = w * 0.44 - (18 * scale);
+      const chairSeatY = groundY - footHeight - (120 * Math.cos(85 * Math.PI / 180) + 120 * Math.cos(-5 * Math.PI / 180)) * scale + (12 * scale);
+      const chairSeatX = w * 0.44 - (22 * scale);
       ctx.strokeStyle = 'rgba(56, 189, 248, 0.5)';
       ctx.lineWidth = 2.5;
       ctx.beginPath();
@@ -281,7 +517,59 @@ class MoveAssist2DSchematic {
     }
     ctx.restore();
 
-    // 5. Biological Muscle Action Lines (Biolink overlay)
+    // =========================================================================
+    // 5. Contralateral (Left) Leg - Background Sagittal View
+    // Synchronized 180° out-of-phase with Right Leg in alternating bipedal motion
+    // =========================================================================
+    ctx.save();
+    // Muted bone outline
+    ctx.strokeStyle = 'rgba(71, 85, 105, 0.45)';
+    ctx.lineWidth = 8 * scale;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(hipX, hipY);
+    ctx.lineTo(leftKneeX, leftKneeY);
+    ctx.lineTo(leftAnkleX, leftAnkleY);
+    ctx.stroke();
+
+    // Muted mechanical linkage
+    ctx.strokeStyle = 'rgba(6, 182, 212, 0.28)';
+    ctx.lineWidth = 2 * scale;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.moveTo(hipX - 3, hipY + 8);
+    ctx.lineTo(leftKneeX - 3, leftKneeY);
+    ctx.lineTo(leftAnkleX - 3, leftAnkleY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Left Knee joint pivot
+    ctx.fillStyle = '#070f1e';
+    ctx.strokeStyle = 'rgba(6, 182, 212, 0.35)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(leftKneeX, leftKneeY, 8 * scale, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    // Left Footplate rotated along leftFootAngleRad
+    ctx.save();
+    ctx.translate(leftAnkleX, leftAnkleY);
+    ctx.rotate(leftFootAngleRad);
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.7)';
+    ctx.strokeStyle = 'rgba(100, 116, 139, 0.4)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(-18 * scale, 3 * scale, 64 * scale, 5 * scale, 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.restore();
+
+    // =========================================================================
+    // 6. Biological Muscle Action Lines (Biolink overlay on Right Leg)
+    // =========================================================================
     ctx.save();
     const emgAlpha = Math.min(1.0, 0.25 + this.emg_env * 1.5);
     const activeMuscleColor = this.soft_stop_active
@@ -292,25 +580,25 @@ class MoveAssist2DSchematic {
     ctx.strokeStyle = activeMuscleColor;
     ctx.lineWidth = 2.5 + this.emg_env * 3.5;
     ctx.beginPath();
-    ctx.moveTo(hipX + 12 * Math.cos(thighRad), hipY + 12 * Math.sin(thighRad));
+    ctx.moveTo(hipX + 12 * Math.cos(rightThighRad), hipY + 12 * Math.sin(rightThighRad));
     // Over anterior knee
-    const patellaX = kneeX + 16 * Math.cos(thighRad - Math.PI / 2);
-    const patellaY = kneeY + 16 * Math.sin(thighRad - Math.PI / 2);
+    const patellaX = rightKneeX + 16 * Math.cos(rightThighRad - Math.PI / 2);
+    const patellaY = rightKneeY + 16 * Math.sin(rightThighRad - Math.PI / 2);
     ctx.lineTo(patellaX, patellaY);
-    ctx.lineTo(kneeX + 22 * Math.sin(shankRad), kneeY + 30 * Math.cos(shankRad));
+    ctx.lineTo(rightKneeX + 22 * Math.sin(rightShankRad), rightKneeY + 30 * Math.cos(rightShankRad));
     ctx.stroke();
 
     // Posterior: Hamstrings tendon line
     ctx.strokeStyle = 'rgba(168, 85, 247, 0.35)';
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.moveTo(hipX - 10 * Math.cos(thighRad), hipY - 10 * Math.sin(thighRad));
-    ctx.lineTo(kneeX - 14 * Math.cos(thighRad - Math.PI / 2), kneeY - 14 * Math.sin(thighRad - Math.PI / 2));
-    ctx.lineTo(kneeX - 12 * Math.sin(shankRad), kneeY + 30 * Math.cos(shankRad));
+    ctx.moveTo(hipX - 10 * Math.cos(rightThighRad), hipY - 10 * Math.sin(rightThighRad));
+    ctx.lineTo(rightKneeX - 14 * Math.cos(rightThighRad - Math.PI / 2), rightKneeY - 14 * Math.sin(rightThighRad - Math.PI / 2));
+    ctx.lineTo(rightKneeX - 12 * Math.sin(rightShankRad), rightKneeY + 30 * Math.cos(rightShankRad));
     ctx.stroke();
     ctx.restore();
 
-    // 6. Biological Bone Outlines (Femur & Tibia)
+    // 7. Biological Bone Outlines (Right Femur & Tibia)
     ctx.save();
     ctx.strokeStyle = 'rgba(226, 232, 240, 0.25)';
     ctx.lineWidth = 10 * scale;
@@ -318,16 +606,16 @@ class MoveAssist2DSchematic {
     // Femur
     ctx.beginPath();
     ctx.moveTo(hipX, hipY);
-    ctx.lineTo(kneeX, kneeY);
+    ctx.lineTo(rightKneeX, rightKneeY);
     ctx.stroke();
     // Tibia
     ctx.beginPath();
-    ctx.moveTo(kneeX, kneeY);
-    ctx.lineTo(ankleX, ankleY);
+    ctx.moveTo(rightKneeX, rightKneeY);
+    ctx.lineTo(rightAnkleX, rightAnkleY);
     ctx.stroke();
     ctx.restore();
 
-    // 7. Exoskeleton Mechanical Linkages (CAD Style)
+    // 8. Exoskeleton Mechanical Linkages (CAD Style on Right Leg)
     ctx.save();
     // Thigh Cuff & Robotic Strut
     ctx.lineWidth = 6 * scale;
@@ -335,7 +623,7 @@ class MoveAssist2DSchematic {
     ctx.lineCap = 'round';
     ctx.beginPath();
     ctx.moveTo(hipX + 4, hipY + 10);
-    ctx.lineTo(kneeX + 4, kneeY);
+    ctx.lineTo(rightKneeX + 4, rightKneeY);
     ctx.stroke();
 
     // Thigh Titanium Linkage Accent
@@ -343,32 +631,32 @@ class MoveAssist2DSchematic {
     ctx.strokeStyle = '#06b6d4';
     ctx.beginPath();
     ctx.moveTo(hipX + 4, hipY + 10);
-    ctx.lineTo(kneeX + 4, kneeY);
+    ctx.lineTo(rightKneeX + 4, rightKneeY);
     ctx.stroke();
 
     // Shank Brace & Telescopic Strut
     ctx.lineWidth = 6 * scale;
     ctx.strokeStyle = '#1e293b';
     ctx.beginPath();
-    ctx.moveTo(kneeX + 3, kneeY);
-    ctx.lineTo(ankleX + 3, ankleY);
+    ctx.moveTo(rightKneeX + 3, rightKneeY);
+    ctx.lineTo(rightAnkleX + 3, rightAnkleY);
     ctx.stroke();
 
     ctx.lineWidth = 2 * scale;
     ctx.strokeStyle = '#38bdf8';
     ctx.beginPath();
-    ctx.moveTo(kneeX + 3, kneeY);
-    ctx.lineTo(ankleX + 3, ankleY);
+    ctx.moveTo(rightKneeX + 3, rightKneeY);
+    ctx.lineTo(rightAnkleX + 3, rightAnkleY);
     ctx.stroke();
 
     // Telescopic graduation ticks on shank
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
     ctx.lineWidth = 1;
     for (let t = 0.25; t <= 0.75; t += 0.1) {
-      const tx = kneeX + (ankleX - kneeX) * t;
-      const ty = kneeY + (ankleY - kneeY) * t;
-      const perpX = Math.cos(shankRad);
-      const perpY = -Math.sin(shankRad);
+      const tx = rightKneeX + (rightAnkleX - rightKneeX) * t;
+      const ty = rightKneeY + (rightAnkleY - rightKneeY) * t;
+      const perpX = Math.cos(rightShankRad);
+      const perpY = -Math.sin(rightShankRad);
       ctx.beginPath();
       ctx.moveTo(tx - 3 * perpX, ty - 3 * perpY);
       ctx.lineTo(tx + 3 * perpX, ty + 3 * perpY);
@@ -376,7 +664,7 @@ class MoveAssist2DSchematic {
     }
     ctx.restore();
 
-    // 8. Pelvis & Hip Pivot Assembly
+    // 9. Pelvis & Hip Pivot Assembly
     ctx.save();
     ctx.fillStyle = '#0f172a';
     ctx.strokeStyle = '#38bdf8';
@@ -402,31 +690,52 @@ class MoveAssist2DSchematic {
     ctx.stroke();
     ctx.restore();
 
-    // 9. Footplate & Ankle Joint
+    // 10. ROTATING FOOTPLATE & ANKLE JOINT (Articulated with live ankle angle)
     ctx.save();
+    // Rotate entire foot assembly around ankle pivot
+    ctx.save();
+    ctx.translate(rightAnkleX, rightAnkleY);
+    ctx.rotate(rightFootAngleRad);
+
     // Carbon Footplate
     ctx.fillStyle = '#0f172a';
     ctx.strokeStyle = '#38bdf8';
     ctx.lineWidth = 2.5;
     ctx.beginPath();
-    ctx.roundRect(footHeelX, footHeelY, (footToeX - footHeelX), 7 * scale, [2, 4, 4, 2]);
+    ctx.roundRect(-20 * scale, 4 * scale, 68 * scale, 7 * scale, [2, 4, 4, 2]);
     ctx.fill();
     ctx.stroke();
 
-    // Ankle Pivot
+    // Ankle Pivot Core
     ctx.fillStyle = '#0f172a';
     ctx.strokeStyle = '#38bdf8';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.arc(ankleX, ankleY, 7 * scale, 0, Math.PI * 2);
+    ctx.arc(0, 0, 7 * scale, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
+
+    ctx.restore();
     ctx.restore();
 
-    // 10. Dynamic Ground Reaction Force (vGRF) Vectors & FSR Markers
+    // 11. Dynamic Ground Reaction Force (vGRF) Vectors & FSR Markers
     ctx.save();
+    const isStance = this.kin_mode === 'SIT_STAND' || this.kin_mode === 'STANDBY' || (this.gait_pct < 55.0);
     const maxGrfH = 45 * scale;
+    const cosFoot = Math.cos(rightFootAngleRad);
+    const sinFoot = Math.sin(rightFootAngleRad);
+
+    const heelSensorX = rightAnkleX + (-14 * scale) * cosFoot - (11 * scale) * sinFoot;
+    const heelSensorY = rightAnkleY + (-14 * scale) * sinFoot + (11 * scale) * cosFoot;
+
+    const metaSensorX = rightAnkleX + (16 * scale) * cosFoot - (11 * scale) * sinFoot;
+    const metaSensorY = rightAnkleY + (16 * scale) * sinFoot + (11 * scale) * cosFoot;
+
+    const toeSensorX = rightAnkleX + (42 * scale) * cosFoot - (11 * scale) * sinFoot;
+    const toeSensorY = rightAnkleY + (42 * scale) * sinFoot + (11 * scale) * cosFoot;
+
     const drawGrfVector = (x, y, forceN, label, color) => {
+      if (!isStance) return;
       const arrowH = Math.min(maxGrfH, (forceN / 400.0) * maxGrfH);
       if (arrowH > 3) {
         ctx.strokeStyle = color;
@@ -455,12 +764,12 @@ class MoveAssist2DSchematic {
       ctx.fill();
     };
 
-    drawGrfVector(footHeelX + 6 * scale, footHeelY + 3, this.fsr_heel, 'HEEL', '#10b981');
-    drawGrfVector(ankleX + 16 * scale, footHeelY + 3, this.fsr_meta, 'META', '#06b6d4');
-    drawGrfVector(footToeX - 6 * scale, footToeY + 3, this.fsr_toe, 'TOE', '#38bdf8');
+    drawGrfVector(heelSensorX, heelSensorY, this.fsr_heel, 'HEEL', '#10b981');
+    drawGrfVector(metaSensorX, metaSensorY, this.fsr_meta, 'META', '#06b6d4');
+    drawGrfVector(toeSensorX, toeSensorY, this.fsr_toe, 'TOE', '#38bdf8');
     ctx.restore();
 
-    // 11. Center of Mass (COM) Crosshair Indicators (Clean, no text clutter on bones)
+    // 12. Center of Mass (COM) Crosshairs
     ctx.save();
     const drawComCrosshair = (x, y) => {
       ctx.strokeStyle = '#f59e0b';
@@ -476,16 +785,16 @@ class MoveAssist2DSchematic {
       ctx.stroke();
     };
 
-    const comThighX = hipX + (kneeX - hipX) * 0.433;
-    const comThighY = hipY + (kneeY - hipY) * 0.433;
+    const comThighX = hipX + (rightKneeX - hipX) * 0.433;
+    const comThighY = hipY + (rightKneeY - hipY) * 0.433;
     drawComCrosshair(comThighX, comThighY);
 
-    const comShankX = kneeX + (ankleX - kneeX) * 0.433;
-    const comShankY = kneeY + (ankleY - kneeY) * 0.433;
+    const comShankX = rightKneeX + (rightAnkleX - rightKneeX) * 0.433;
+    const comShankY = rightKneeY + (rightAnkleY - rightKneeY) * 0.433;
     drawComCrosshair(comShankX, comShankY);
     ctx.restore();
 
-    // 12. ROTARY KNEE ACTUATOR (Detailed Engineering Module)
+    // 13. ROTARY KNEE ACTUATOR (Detailed Engineering Module)
     ctx.save();
     const actR = 22 * scale;
 
@@ -494,7 +803,7 @@ class MoveAssist2DSchematic {
     ctx.strokeStyle = this.soft_stop_active ? '#fbbf24' : '#06b6d4';
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.arc(kneeX, kneeY, actR, 0, Math.PI * 2);
+    ctx.arc(rightKneeX, rightKneeY, actR, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
 
@@ -502,8 +811,8 @@ class MoveAssist2DSchematic {
     ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
     for (let i = 0; i < 8; i++) {
       const bAng = (i * Math.PI) / 4;
-      const bx = kneeX + (actR - 3.5) * Math.cos(bAng);
-      const by = kneeY + (actR - 3.5) * Math.sin(bAng);
+      const bx = rightKneeX + (actR - 3.5) * Math.cos(bAng);
+      const by = rightKneeY + (actR - 3.5) * Math.sin(bAng);
       ctx.beginPath();
       ctx.arc(bx, by, 1.2, 0, Math.PI * 2);
       ctx.fill();
@@ -513,27 +822,27 @@ class MoveAssist2DSchematic {
     ctx.strokeStyle = 'rgba(56, 189, 248, 0.3)';
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.arc(kneeX, kneeY, actR - 7 * scale, 0, Math.PI * 2);
+    ctx.arc(rightKneeX, rightKneeY, actR - 7 * scale, 0, Math.PI * 2);
     ctx.stroke();
 
-    // Knee Physiological ROM Sector (0 to 115 deg)
-    const refExtAng = thighRad + Math.PI / 2;
-    const maxFlexAng = refExtAng - (115 * Math.PI) / 180.0;
+    // Knee Physiological ROM Sector (0 to 120 deg strict anatomical limit, zero recurvatum)
+    const refExtAng = rightThighRad + Math.PI / 2;
+    const maxFlexAng = refExtAng - (120 * Math.PI) / 180.0;
 
     // Shaded Safe ROM Sector
     ctx.fillStyle = 'rgba(6, 182, 212, 0.08)';
     ctx.beginPath();
-    ctx.moveTo(kneeX, kneeY);
-    ctx.arc(kneeX, kneeY, actR + 12 * scale, maxFlexAng, refExtAng);
+    ctx.moveTo(rightKneeX, rightKneeY);
+    ctx.arc(rightKneeX, rightKneeY, actR + 12 * scale, maxFlexAng, refExtAng);
     ctx.closePath();
     ctx.fill();
 
     // Active Flexion Wedge
-    const curFlexAng = refExtAng - (this.current_knee_deg * Math.PI) / 180.0;
+    const curFlexAng = refExtAng - (this.right_knee_deg * Math.PI) / 180.0;
     ctx.fillStyle = 'rgba(6, 182, 212, 0.25)';
     ctx.beginPath();
-    ctx.moveTo(kneeX, kneeY);
-    ctx.arc(kneeX, kneeY, actR + 12 * scale, curFlexAng, refExtAng);
+    ctx.moveTo(rightKneeX, rightKneeY);
+    ctx.arc(rightKneeX, rightKneeY, actR + 12 * scale, curFlexAng, refExtAng);
     ctx.closePath();
     ctx.fill();
 
@@ -541,13 +850,13 @@ class MoveAssist2DSchematic {
     ctx.strokeStyle = '#06b6d4';
     ctx.lineWidth = 1.8;
     ctx.beginPath();
-    ctx.arc(kneeX, kneeY, actR + 12 * scale, curFlexAng, refExtAng);
+    ctx.arc(rightKneeX, rightKneeY, actR + 12 * scale, curFlexAng, refExtAng);
     ctx.stroke();
 
     // Actuator Center Core & Shaft
     ctx.fillStyle = this.soft_stop_active ? '#fbbf24' : '#0284c7';
     ctx.beginPath();
-    ctx.arc(kneeX, kneeY, 5 * scale, 0, Math.PI * 2);
+    ctx.arc(rightKneeX, rightKneeY, 5 * scale, 0, Math.PI * 2);
     ctx.fill();
 
     // Actuator Dynamic Torque Vector (Curved Rotational Arrow)
@@ -562,21 +871,22 @@ class MoveAssist2DSchematic {
       ctx.lineWidth = Math.min(4, 1.5 + (tauMag / 35.0) * 2.5);
       ctx.beginPath();
       if (torqueDir > 0) {
-        ctx.arc(kneeX, kneeY, arrowRadius, -Math.PI / 2, -Math.PI / 2 + sweepAng, false);
+        ctx.arc(rightKneeX, rightKneeY, arrowRadius, -Math.PI / 2, -Math.PI / 2 + sweepAng, false);
       } else {
-        ctx.arc(kneeX, kneeY, arrowRadius, -Math.PI / 2, -Math.PI / 2 - sweepAng, true);
+        ctx.arc(rightKneeX, rightKneeY, arrowRadius, -Math.PI / 2, -Math.PI / 2 - sweepAng, true);
       }
       ctx.stroke();
     }
     ctx.restore();
 
-    // 13. ENGINEERING CALLOUT CHANNELS & LEADER LINES (No labels on limbs!)
+    // =========================================================================
+    // 14. ENGINEERING CALLOUT CHANNELS & LEADER LINES (Direct Telemetry Sync)
+    // =========================================================================
     ctx.save();
     const leftW = Math.min(125, Math.max(95, w * 0.26));
     const rightW = Math.min(155, Math.max(120, w * 0.32));
     const rightX = w - rightW - 10;
 
-    // Helper to draw callout card and leader line
     const drawCallout = (x, y, width, height, title, rows, targetX, targetY, isLeft) => {
       // Background box
       ctx.fillStyle = 'rgba(11, 19, 36, 0.92)';
@@ -635,8 +945,8 @@ class MoveAssist2DSchematic {
 
     // Callout 1 (Top Left): Hip / Pelvis
     drawCallout(10, 34, leftW, 36, 'HIP / PELVIS', [
-      { text: `θ_hip: ${(this.current_thigh_deg || 0).toFixed(1)}°`, color: '#38bdf8', bold: true },
-      { text: 'Plumb line ref (0°)', color: '#64748b' }
+      { text: `θ_hip: ${(this.right_thigh_deg || 0).toFixed(1)}°`, color: '#38bdf8', bold: true },
+      { text: `Phase: ${this.gait_pct.toFixed(0)}%`, color: '#64748b' }
     ], hipX, hipY, true);
 
     // Callout 2 (Mid-Upper Left): Thigh
@@ -653,14 +963,20 @@ class MoveAssist2DSchematic {
       { text: 'Tibia 42cm', color: '#64748b' }
     ], comShankX, comShankY, true);
 
-    // Callout 4 (Bottom Left): Ankle & Footplate
-    drawCallout(10, 186, leftW, 36, 'ANKLE & FOOT', [
-      { text: 'Ankle: 0° Neutral', color: '#94a3b8' },
-      { text: 'Carbon Footplate', color: '#64748b' }
-    ], ankleX, ankleY, true);
+    // Callout 4 (Bottom Left): Dynamic Ankle & Footplate
+    const pitchVal = (this.right_foot_angle_deg || 0).toFixed(1);
+    const pitchSign = (this.right_foot_angle_deg || 0) >= 0 ? '+' : '';
+    const ankleState = (this.kin_mode === 'SIT_STAND' || this.kin_mode === 'STANDBY')
+      ? 'Level Grounded Stance'
+      : (this.gait_pct >= 55.0 ? 'Level Swing Clearance' : (this.right_foot_angle_deg < -2.0 ? 'Heel Strike Landing' : (this.right_foot_angle_deg > 3.0 ? 'Toe Push-Off' : 'Foot Flat Stance')));
 
-    // Callout 5 (Right Center): KNEE ACTUATOR & KINEMATICS (Single Source of Truth!)
-    const kneeAngleSingleSource = (this.target_knee_deg || 0).toFixed(1);
+    drawCallout(10, 186, leftW, 36, 'ANKLE & FOOT', [
+      { text: `Foot Pitch: ${pitchSign}${pitchVal}°`, color: '#38bdf8', bold: true },
+      { text: ankleState, color: '#10b981' }
+    ], rightAnkleX, rightAnkleY, true);
+
+    // Callout 5 (Right Center): KNEE ACTUATOR & KINEMATICS (Exact 3D Twin Value)
+    const kneeAngleSingleSource = (this.right_knee_deg || 0).toFixed(1);
     const torqueStr = `${(this.tau_cmd_nm || 0) >= 0 ? '+' : ''}${(this.tau_cmd_nm || 0).toFixed(1)} N·m`;
     const torqueColor = (this.tau_cmd_nm || 0) >= 0 ? '#10b981' : '#a855f7';
 
@@ -669,8 +985,8 @@ class MoveAssist2DSchematic {
       { text: `Velocity: ${(this.omega_knee_deg_s || 0).toFixed(1)}°/s`, color: '#94a3b8' },
       { text: `τ_exo: ${torqueStr}`, color: torqueColor, bold: true },
       { text: 'Encoder: 12-bit (0.088°)', color: '#06b6d4' },
-      { text: 'Safe ROM: 0° - 115°', color: '#64748b' }
-    ], kneeX, kneeY, false);
+      { text: 'Safe ROM: 0° - 120° (Strict Lock)', color: '#64748b' }
+    ], rightKneeX, rightKneeY, false);
 
     // Callout 6 (Right Lower): sEMG Biological Drive
     drawCallout(rightX, 118, rightW, 46, 'BIOMECHANICAL DRIVE', [
@@ -684,7 +1000,7 @@ class MoveAssist2DSchematic {
       drawCallout(rightX, 172, rightW, 36, 'ANTI-FALL LOCK', [
         { text: '+18.0 N·m STANCE HOLD', color: '#fbbf24', bold: true },
         { text: `${Math.round(this.soft_stop_rem_s)}s Decel Ramp`, color: '#fbbf24' }
-      ], kneeX + 12 * scale, kneeY, false);
+      ], rightKneeX + 12 * scale, rightKneeY, false);
     }
 
     // Gait Status Pill at bottom right
@@ -699,7 +1015,7 @@ class MoveAssist2DSchematic {
 
     ctx.font = '700 7.5px monospace';
     ctx.fillStyle = this.gait_phase === 'SWING' ? '#a855f7' : '#10b981';
-    ctx.fillText(`GAIT: ${this.gait_phase}`, pillX + 8, pillY + 12);
+    ctx.fillText(`GAIT: ${this.gait_phase} (${this.gait_pct.toFixed(0)}%)`, pillX + 8, pillY + 12);
     ctx.restore();
     ctx.restore();
   }

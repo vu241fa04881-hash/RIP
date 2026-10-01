@@ -7,6 +7,8 @@ import json
 import time
 import datetime
 import mimetypes
+mimetypes.add_type("model/gltf-binary", ".glb")
+mimetypes.add_type("model/gltf+json", ".gltf")
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from typing import Optional
@@ -130,10 +132,19 @@ class MoveAssistRequestHandler(BaseHTTPRequestHandler):
         else:
             rel_path = path.lstrip("/")
 
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        assets_dir = os.path.abspath(os.path.join(repo_root, "assets"))
         file_path = os.path.abspath(os.path.join(FRONTEND_DIR, rel_path))
 
-        # Security check: prevent directory traversal
-        if not file_path.startswith(FRONTEND_DIR) or not os.path.exists(file_path) or os.path.isdir(file_path):
+        # Check root assets directory if not found in FRONTEND_DIR
+        if (not os.path.exists(file_path) or os.path.isdir(file_path)) and (rel_path.startswith("assets") or rel_path.startswith("assets/")):
+            alt_path = os.path.abspath(os.path.join(repo_root, rel_path))
+            if alt_path.startswith(assets_dir) and os.path.exists(alt_path) and not os.path.isdir(alt_path):
+                file_path = alt_path
+
+        # Security check: prevent directory traversal outside FRONTEND_DIR or assets_dir
+        allowed_roots = (FRONTEND_DIR, assets_dir)
+        if not any(file_path.startswith(r) for r in allowed_roots) or not os.path.exists(file_path) or os.path.isdir(file_path):
             self.send_error(404, "File Not Found")
             return
 

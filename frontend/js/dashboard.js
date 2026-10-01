@@ -102,6 +102,7 @@ class MoveAssistDashboard {
 
     // 5 Primary Metric Cards
     this.cardValMode = document.getElementById('card-val-mode');
+    this.cardSubMode = document.getElementById('card-sub-mode');
     this.cardValAngle = document.getElementById('card-val-angle');
     this.cardValTorque = document.getElementById('card-val-torque');
     this.cardSubTorque = document.getElementById('card-sub-torque');
@@ -424,7 +425,7 @@ class MoveAssistDashboard {
         if (this.softStopEscalationNote) {
           if (css.duration_s <= 35.0 || seriousness === 'ACUTE_IMMEDIATE_FALL' || (css.reason && css.reason.includes('ESCALATION'))) {
             this.softStopEscalationNote.style.display = 'block';
-            const fatiguePct = Math.round((telemetry.user?.fatigue_index || 0.96) * 100);
+            const fatiguePct = Math.round(((telemetry.user?.fatigue_index ?? telemetry.aan?.fatigue_index) || 0.96) * 100);
             this.softStopEscalationNote.textContent = `⚡ ACUTE FALL RISK (${fatiguePct}%): Rapid 30s Anti-Buckle Deceleration Engaged!`;
           } else {
             this.softStopEscalationNote.style.display = 'none';
@@ -638,6 +639,23 @@ class MoveAssistDashboard {
     const grfFormatted = Math.round(sensors.foot_pressure?.total_grf_n || 0);
 
     if (this.cardValMode) this.cardValMode.textContent = currentMode;
+    if (this.cardSubMode) {
+      if (currentMode === 'RUN') {
+        const spm = gait.cadence_spm || 141.2;
+        const period = gait.stride_period_s || 0.85;
+        this.cardSubMode.textContent = `${period}s Cadence (${Math.round(spm)} spm)`;
+      } else if (currentMode === 'WALK') {
+        const spm = gait.cadence_spm || 60.0;
+        const period = gait.stride_period_s || 2.0;
+        this.cardSubMode.textContent = `${period}s Cadence (${Math.round(spm)} spm)`;
+      } else if (currentMode === 'SIT_STAND') {
+        this.cardSubMode.textContent = 'Bilateral Transfer (0-85°)';
+      } else if (currentMode === 'STANDBY') {
+        this.cardSubMode.textContent = 'Upright Stance Lock (8°)';
+      } else {
+        this.cardSubMode.textContent = 'Manual Direct Joint Jog';
+      }
+    }
     if (this.cardValAngle) this.cardValAngle.textContent = singleSourceKneeAngle;
     if (this.cardValTorque) this.cardValTorque.textContent = cmdTorqueFormatted;
     if (this.cardSubTorque) {
@@ -654,9 +672,12 @@ class MoveAssistDashboard {
     if (this.aiValGait) this.aiValGait.textContent = (gait.phase || 'STANCE').replace('_', ' ');
     if (this.aiValAssist) this.aiValAssist.textContent = `${Math.round(exoPct)}%`;
     if (this.aiValTorque) this.aiValTorque.textContent = `${cmdTorqueFormatted} N·m`;
+    const userFatigue = (telemetry.user?.fatigue_index ?? telemetry.aan?.fatigue_index ?? 0);
+    const userStrength = (telemetry.user?.effective_strength ?? telemetry.aan?.user_strength ?? 0.35);
+
     if (this.aiValConfidence) {
       const baseConf = sensors.all_healthy ? 94 : 68;
-      const fatiguePenalty = Math.round((telemetry.user?.fatigue_index || 0) * 6);
+      const fatiguePenalty = Math.round(userFatigue * 6);
       this.aiValConfidence.textContent = `${Math.max(60, baseConf - fatiguePenalty)}%`;
     }
     if (this.aiValAdaptation) {
@@ -670,11 +691,11 @@ class MoveAssistDashboard {
         this.aiValRecommendation.textContent = 'Emergency Stop engaged — Joint immobilized for safety';
       } else if (mode === 'CONTROLLED_SOFT_STOP') {
         this.aiValRecommendation.textContent = 'Anti-fall deceleration in progress — Anti-collapse stance lock active';
-      } else if ((telemetry.user?.fatigue_index || 0) > 0.85) {
+      } else if (userFatigue > 0.85) {
         this.aiValRecommendation.textContent = 'Critical fatigue detected (>85%) — Anti-fall soft stop recommended';
-      } else if ((telemetry.user?.fatigue_index || 0) > 0.40) {
+      } else if (userFatigue > 0.40) {
         this.aiValRecommendation.textContent = 'Elevated fatigue detected — Augmenting knee extension torque';
-      } else if ((telemetry.user?.effective_strength || 0.35) < 0.20) {
+      } else if (userStrength < 0.20) {
         this.aiValRecommendation.textContent = 'Low voluntary patient drive — Increasing robotic AAN augmentation';
       } else {
         this.aiValRecommendation.textContent = 'Nominal gait trajectory — Maintaining adaptive assistance';
