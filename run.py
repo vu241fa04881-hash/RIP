@@ -28,7 +28,8 @@ def main():
 
     port = DEFAULT_SIM.server_port
     host = DEFAULT_SIM.server_host
-    url = f"http://{host}:{port}"
+    display_host = "127.0.0.1" if host == "0.0.0.0" else host
+    url = f"http://{display_host}:{port}"
 
     # 1. Initialize Simulation Engine
     print("[1/3] Initializing 100 Hz Closed-Loop Simulation Engine...")
@@ -36,13 +37,13 @@ def main():
     engine.start_background_loop()
 
     # 2. Start HTTP & SSE Telemetry Server
-    print(f"[2/3] Starting Telemetry Streaming Server on {url}...")
+    print(f"[2/3] Starting Telemetry Streaming Server on {host}:{port}...")
     server = create_server(host=host, port=port, engine=engine)
     server_thread = Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
 
     # 3. Launch Web Cockpit in Browser
-    print(f"[3/3] Opening Web Cockpit in your default browser...")
+    print(f"[3/3] Opening Web Cockpit in your default browser at {url}...")
     try:
         webbrowser.open(url)
     except Exception as e:

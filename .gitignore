@@ -4,3 +4,4 @@ __pycache__/
 .pytest_cache/
 MoveAssist_Clinical_Report_*.xlsx
 .vscode/
+assets/Documents/
